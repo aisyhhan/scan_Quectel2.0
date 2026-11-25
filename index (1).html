@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scan Quectel ke Sheets</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #111; color: #eee; }
+  header { padding: 10px 14px; font-weight: 600; background: #1b1b1b; }
+  video { width: 100%; max-height: 40vh; object-fit: cover; background: #000; }
+  #status { padding: 10px 14px; font-size: 17px; font-weight: 600; }
+  .ok { color: #6fdc8c; } .err { color: #ff7b7b; } .warn { color: #ffd166; }
+  #raw { margin: 0 14px; padding: 8px; background: #222; border-radius: 6px; font-family: monospace;
+         font-size: 12px; color: #9cf; word-break: break-all; min-height: 18px; }
+  label { display: block; margin: 10px 14px 2px; font-size: 13px; color: #aaa; }
+  input { width: calc(100% - 28px); margin: 0 14px; padding: 10px; font-size: 17px; box-sizing: border-box;
+          border-radius: 6px; border: 1px solid #444; background: #1e1e1e; color: #fff; font-family: monospace; }
+  .row { display: flex; }
+  button { margin: 12px 14px 4px; padding: 12px 18px; font-size: 16px; border-radius: 6px; border: 0; }
+  #save { background: #2e7d32; color: #fff; }
+  #log { padding: 8px 14px; font-size: 13px; color: #aaa; }
+</style>
+</head>
+<body>
+<header>Scan Quectel &rarr; Google Sheets</header>
+<video id="video" playsinline muted></video>
+<div id="status">Memulai kamera...</div>
+<div id="raw">(isi kode yang terbaca akan tampil di sini)</div>
+
+<label>IMEI</label>
+<input id="imei" inputmode="numeric" maxlength="15" placeholder="15 digit">
+<label>SN</label>
+<input id="sn" autocapitalize="characters" placeholder="contoh: MPN26IO0Y000185">
+<label>ID Numb (opsional)</label>
+<input id="idn" placeholder="boleh dikosongkan">
+
+<div class="row">
+  <button id="save">Simpan ke Sheets</button>
+  <button id="reset">Kosongkan</button>
+</div>
+<div id="log"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+// === GANTI dengan URL Web App dari Apps Script (berakhiran /exec) ===
+const SCRIPT_URL = "PASTE_URL_WEB_APP_DI_SINI";
+
+const $ = (id) => document.getElementById(id);
+const video = $("video"), statusEl = $("status");
+let busy = false, lastText = "", lastTime = 0, lastSavedImei = "";
+
+function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ""; }
+function addLog(msg) { $("log").innerHTML = msg + "<br>" + $("log").innerHTML; }
+
+function parse(text) {
+  const d = {};
+  let m = text.match(/IMEI[:=\s]*(\d{15})/i) || text.match(/\b(\d{15})\b/);
+  if (m) d.imei = m[1];
+  m = text.match(/\bSN[:=\s]*([A-Z0-9]{8,})/i);
+  if (m) d.sn = m[1].toUpperCase();
+  m = text.match(/\bID[\s_.-]*(?:NUMB|NUM|NO)?[:=\s]*([A-Z0-9]+)/i);
+  if (m) d.id = m[1];
+  return d;
+}
+
+async function send() {
+  const imei = $("imei").value.trim();
+  const sn = $("sn").value.trim().toUpperCase();
+  const id = $("idn").value.trim();
+  if (!/^\d{15}$/.test(imei)) { setStatus("IMEI harus 15 digit", "err"); return; }
+  if (sn.length < 8) { setStatus("SN belum diisi", "warn"); $("sn").focus(); return; }
+  if (busy) return;
+  busy = true;
+  setStatus("Mengirim ke Sheets...", "warn");
+  try {
+    const res = await fetch(SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ imei, sn, id }),
+    });
+    const r = await res.json();
+    if (r.ok) {
+      setStatus("OK #" + r.no + " tersimpan", "ok");
+      addLog("#" + r.no + " " + imei + " / " + sn);
+      if (navigator.vibrate) navigator.vibrate(150);
+      lastSavedImei = imei;
+      clearForm();
+    } else if (r.duplicate) {
+      lastSavedImei = imei;
+      setStatus("DUPLIKAT: IMEI sudah ada di sheet", "err");
+    } else {
+      setStatus("Gagal: " + r.error, "err");
+    }
+  } catch (e) {
+    setStatus("Gagal kirim ke Sheets (" + e.message + "). Cek SCRIPT_URL & deployment.", "err");
+  }
+  busy = false;
+}
+
+function clearForm() { $("imei").value = ""; $("sn").value = ""; $("idn").value = ""; }
+
+function handleText(text) {
+  const now = Date.now();
+  if (text === lastText && now - lastTime < 2500) return;
+  lastText = text; lastTime = now;
+  $("raw").textContent = text;
+
+  const p = parse(text);
+  if (p.imei && p.imei === lastSavedImei) return; // modul yang barusan disimpan, abaikan
+  if (p.imei) $("imei").value = p.imei;
+  if (p.sn) $("sn").value = p.sn;
+  if (p.id) $("idn").value = p.id;
+
+  if ($("imei").value && $("sn").value) {
+    send();
+  } else if ($("imei").value) {
+    setStatus("IMEI terbaca. Isi SN lalu tekan Simpan.", "warn");
+    $("sn").focus();
+  } else {
+    setStatus("Kode terbaca tapi IMEI tidak ditemukan. Lihat teks biru di atas.", "warn");
+  }
+}
+
+$("save").onclick = send;
+$("reset").onclick = () => { clearForm(); lastSavedImei = ""; lastText = ""; setStatus("Arahkan kode 2D ke kamera"); };
+
+async function start() {
+  if (SCRIPT_URL.startsWith("PASTE")) { setStatus("SCRIPT_URL belum diisi di index.html", "err"); }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+  } catch (e) {
+    setStatus("Kamera tidak bisa dibuka: " + e.message, "err");
+    return;
+  }
+  if (!SCRIPT_URL.startsWith("PASTE")) setStatus("Arahkan kode 2D ke kamera");
+
+  if ("BarcodeDetector" in window) {
+    try {
+      const formats = await BarcodeDetector.getSupportedFormats();
+      if (formats.includes("data_matrix")) {
+        const det = new BarcodeDetector({ formats: ["data_matrix", "qr_code", "code_128"] });
+        const loop = async () => {
+          try {
+            const codes = await det.detect(video);
+            if (codes.length) handleText(codes[0].rawValue);
+          } catch (e) {}
+          requestAnimationFrame(loop);
+        };
+        loop();
+        return;
+      }
+    } catch (e) {}
+  }
+
+  const Z = ZXing;
+  const hints = new Map();
+  hints.set(Z.DecodeHintType.POSSIBLE_FORMATS,
+    [Z.BarcodeFormat.DATA_MATRIX, Z.BarcodeFormat.QR_CODE, Z.BarcodeFormat.CODE_128]);
+  hints.set(Z.DecodeHintType.TRY_HARDER, true);
+  const reader = new Z.BrowserMultiFormatReader(hints, 300);
+  reader.decodeFromVideoElementContinuously(video, (result) => { if (result) handleText(result.getText()); });
+}
+start();
+</script>
+</body>
+</html>
